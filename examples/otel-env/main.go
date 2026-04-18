@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -191,8 +192,21 @@ func loadConfig() config {
 }
 
 func setupOTel(cfg config) (func(context.Context) error, error) {
-	opts := []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpoint(strings.TrimPrefix(strings.TrimPrefix(cfg.OTelEndpoint, "http://"), "https://")),
+	opts := []otlpmetrichttp.Option{}
+	endpoint := strings.TrimSpace(cfg.OTelEndpoint)
+	if endpoint != "" {
+		if strings.Contains(endpoint, "://") {
+			u, err := url.Parse(endpoint)
+			if err != nil {
+				return nil, fmt.Errorf("parse OTEL_EXPORTER_OTLP_ENDPOINT: %w", err)
+			}
+			opts = append(opts, otlpmetrichttp.WithEndpoint(u.Host))
+			if u.Path != "" && u.Path != "/" {
+				opts = append(opts, otlpmetrichttp.WithURLPath(u.Path))
+			}
+		} else {
+			opts = append(opts, otlpmetrichttp.WithEndpoint(endpoint))
+		}
 	}
 	if cfg.OTelInsecure {
 		opts = append(opts, otlpmetrichttp.WithInsecure())
