@@ -25,12 +25,6 @@ func main() {
 		resilience.WithPermittedNumberOfCallsInHalfOpenState(cfg.HalfOpenPermits),
 	)
 
-	retry := resilience.NewRetry("gin-retry",
-		resilience.WithMaxAttempts(cfg.RetryMaxAttempts),
-		resilience.WithWaitDuration(cfg.RetryWait),
-		resilience.WithExponentialBackoff(cfg.RetryBackoffMultiplier, cfg.RetryMaxInterval),
-	)
-
 	bulkhead := resilience.NewBulkhead("gin-bulkhead",
 		resilience.WithMaxConcurrentCalls(cfg.BulkheadMaxConcurrent),
 		resilience.WithMaxWaitDuration(cfg.BulkheadMaxWait),
@@ -47,7 +41,6 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(resilience.GinMiddleware(resilience.MiddlewareConfig{
 		CircuitBreaker: cb,
-		Retry:          retry,
 		Bulkhead:       bulkhead,
 		RateLimiter:    rateLimiter,
 	}))

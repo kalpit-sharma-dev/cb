@@ -407,6 +407,106 @@ func TestCircuitBreaker_ManualTransitionFromOpenToHalfOpen(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_ManualTransitionConcurrencyRequestIdempotent(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker("cb-manual-concurrency",
+		WithSlidingWindowSize(2),
+		WithMinimumNumberOfCalls(2),
+		WithFailureRateThreshold(50),
+		WithPermittedNumberOfCallsInHalfOpenState(1),
+		WithWaitDurationInOpenState(20*time.Millisecond),
+		WithAutomaticTransitionFromOpenToHalfOpen(false),
+	)
+
+	for i := 0; i < 2; i++ {
+		_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+			return nil, errors.New("fail")
+		})
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("expected OPEN after setup failures, got %s", cb.State())
+	}
+
+	var success int32
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if cb.TransitionToHalfOpen() {
+				atomic.AddInt32(&success, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&success); got != 1 {
+		t.Fatalf("expected exactly one successful transition request, got %d", got)
+	}
+}
+
+func TestCircuitBreaker_ManualTransitionConcurrencySingleProbeAllowed(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker("cb-manual-single-probe",
+		WithSlidingWindowSize(2),
+		WithMinimumNumberOfCalls(2),
+		WithFailureRateThreshold(50),
+		WithPermittedNumberOfCallsInHalfOpenState(1),
+		WithWaitDurationInOpenState(20*time.Millisecond),
+		WithAutomaticTransitionFromOpenToHalfOpen(false),
+	)
+
+	for i := 0; i < 2; i++ {
+		_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+			return nil, errors.New("fail")
+		})
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("expected OPEN after setup failures, got %s", cb.State())
+	}
+	if !cb.TransitionToHalfOpen() {
+		t.Fatalf("expected manual transition request to succeed")
+	}
+
+	start := make(chan struct{})
+	var allowed int32
+	var rejected int32
+	var wg sync.WaitGroup
+
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+				time.Sleep(2 * time.Millisecond)
+				return nil, nil
+			})
+			if err == nil {
+				atomic.AddInt32(&allowed, 1)
+				return
+			}
+			if errors.Is(err, ErrCircuitOpen) {
+				atomic.AddInt32(&rejected, 1)
+				return
+			}
+			t.Errorf("unexpected execute error: %v", err)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&allowed); got != 1 {
+		t.Fatalf("expected exactly one half-open probe to be allowed, got %d", got)
+	}
+	if got := atomic.LoadInt32(&rejected); got == 0 {
+		t.Fatalf("expected at least one rejection while probe limit is 1")
+	}
+}
+
 func TestCircuitBreaker_IgnoreErrors_DoNotCount(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -469,6 +569,37 @@ func TestCircuitBreaker_RecordErrors_Whitelist(t *testing.T) {
 				t.Fatalf("expected 1 failed call, got %d", got)
 			}
 		})
+	}
+}
+
+func TestCircuitBreaker_RecordAndIgnorePredicates_IgnoreTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	ignored := errors.New("ignored")
+	recorded := errors.New("recorded")
+	cb := NewCircuitBreaker("cb-ignore-precedence",
+		WithSlidingWindowSize(10),
+		WithMinimumNumberOfCalls(1),
+		WithFailureRateThreshold(100),
+		WithIgnoreErrors(func(err error) bool { return errors.Is(err, ignored) }),
+		WithRecordErrors(func(err error) bool {
+			return errors.Is(err, ignored) || errors.Is(err, recorded)
+		}),
+	)
+
+	_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+		return nil, ignored
+	})
+	_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+		return nil, recorded
+	})
+
+	m := cb.Metrics()
+	if m.NumberOfBufferedCalls != 1 {
+		t.Fatalf("expected only one buffered call (ignored call excluded), got %d", m.NumberOfBufferedCalls)
+	}
+	if m.NumberOfFailedCalls != 1 {
+		t.Fatalf("expected one failed call from recorded error, got %d", m.NumberOfFailedCalls)
 	}
 }
 

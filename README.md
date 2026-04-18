@@ -41,6 +41,13 @@ The repository includes runnable programs:
 - `examples/mux` — Gorilla Mux middleware integration
 - `examples/gin` — Gin middleware integration
 - `examples/otel-env` — full env-driven configuration + OpenTelemetry bridge
+- `examples/manual-half-open` — explicit manual OPEN -> HALF_OPEN transition flow
+- `examples/retry` — retry with backoff and retry predicate
+- `examples/bulkhead` — semaphore bulkhead behavior under concurrency
+- `examples/rate-limiter` — token-bucket rate-limiter behavior
+- `examples/decorator` — full chain composition in one place
+- `examples/outbound-rest` — wrapping outbound REST client calls
+- `examples/db-call` — wrapping repository/DB-style calls
 
 Run them:
 
@@ -54,6 +61,34 @@ go run ./examples/gin
 
 ```bash
 go run ./examples/otel-env
+```
+
+```bash
+go run ./examples/manual-half-open
+```
+
+```bash
+go run ./examples/retry
+```
+
+```bash
+go run ./examples/bulkhead
+```
+
+```bash
+go run ./examples/rate-limiter
+```
+
+```bash
+go run ./examples/decorator
+```
+
+```bash
+go run ./examples/outbound-rest
+```
+
+```bash
+go run ./examples/db-call
 ```
 
 ### Example endpoints
@@ -519,6 +554,24 @@ See runnable `examples/otel-env/main.go` and `examples/otel-env/.env.example`.
 | `WithRetryOn(func(error) bool)` | all non-nil | Predicate for retryable errors |
 | `WithOnRetry(func(int,error))` | nil | Retry hook |
 
+## Manual transition example
+
+When `AutomaticTransitionFromOpenToHalfOpen` is set to `false`, callers remain blocked in OPEN
+until you request a probe transition:
+
+```go
+cb := resilience.NewCircuitBreaker("manual",
+	resilience.WithAutomaticTransitionFromOpenToHalfOpen(false),
+)
+
+if cb.State() == resilience.StateOpen {
+	ok := cb.TransitionToHalfOpen()
+	if ok {
+		// next allowed call becomes the HALF_OPEN probe
+	}
+}
+```
+
 ### Bulkhead
 
 | Option | Default | Description |
@@ -545,3 +598,29 @@ See runnable `examples/otel-env/main.go` and `examples/otel-env/.env.example`.
 - `NumberOfSlowCalls int`
 - `NumberOfSuccessfulCalls int`
 - `State string`
+
+## Benchmarks
+
+Benchmark suite location: `resilience/benchmark_test.go`
+
+Run all benchmarks:
+
+```bash
+go test -bench=. -benchmem ./resilience
+```
+
+Run a focused benchmark:
+
+```bash
+go test -bench=BenchmarkDecorator_Call_FullChain -benchmem ./resilience
+```
+
+## Fuzzing
+
+Fuzz target location: `resilience/fuzz_test.go`
+
+Run fuzzing for predicate interaction invariants:
+
+```bash
+go test -fuzz=FuzzCircuitBreaker_ErrorPredicateInteractions -fuzztime=10s ./resilience
+```

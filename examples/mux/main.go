@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -27,12 +26,6 @@ func main() {
 		resilience.WithPermittedNumberOfCallsInHalfOpenState(cfg.HalfOpenPermits),
 	)
 
-	retry := resilience.NewRetry("mux-retry",
-		resilience.WithMaxAttempts(cfg.RetryMaxAttempts),
-		resilience.WithWaitDuration(cfg.RetryWait),
-		resilience.WithExponentialBackoff(cfg.RetryBackoffMultiplier, cfg.RetryMaxInterval),
-	)
-
 	bulkhead := resilience.NewBulkhead("mux-bulkhead",
 		resilience.WithMaxConcurrentCalls(cfg.BulkheadMaxConcurrent),
 		resilience.WithMaxWaitDuration(cfg.BulkheadMaxWait),
@@ -47,7 +40,6 @@ func main() {
 	r := mux.NewRouter()
 	r.Use(resilience.GorillaMuxMiddleware(resilience.MiddlewareConfig{
 		CircuitBreaker: cb,
-		Retry:          retry,
 		Bulkhead:       bulkhead,
 		RateLimiter:    rateLimiter,
 	}))
@@ -154,5 +146,3 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 	}
 	return fallback
 }
-
-var _ = errors.Is
