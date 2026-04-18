@@ -572,6 +572,24 @@ if cb.State() == resilience.StateOpen {
 }
 ```
 
+### Manual half-open operational guidance
+
+Use manual transition mode when you need external control over recovery probes (for example,
+after a deployment rollback, dependency failover, or synthetic health check signal).
+
+Recommended pattern:
+
+1. Keep breaker in OPEN while downstream is unhealthy.
+2. Trigger `TransitionToHalfOpen()` only after an explicit health signal (not every request).
+3. Allow a small probe budget with `WithPermittedNumberOfCallsInHalfOpenState`.
+4. If probes succeed, breaker closes automatically; if probes fail, breaker reopens.
+
+Avoid:
+
+- Calling `TransitionToHalfOpen()` from every request path.
+- Using large half-open probe counts during unstable recovery windows.
+- Combining manual transition mode with aggressive retry loops that can amplify load spikes.
+
 ### Bulkhead
 
 | Option | Default | Description |
@@ -613,6 +631,26 @@ Run a focused benchmark:
 
 ```bash
 go test -bench=BenchmarkDecorator_Call_FullChain -benchmem ./resilience
+```
+
+For deterministic PR-to-PR comparison, use Make targets:
+
+```bash
+make bench-core
+```
+
+```bash
+make bench-contention
+```
+
+```bash
+make bench
+```
+
+You can override benchmark knobs:
+
+```bash
+BENCH_COUNT=20 BENCH_TIME=500ms make bench-core
 ```
 
 ## Fuzzing
