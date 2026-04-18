@@ -15,6 +15,7 @@ Production-grade resilience primitives for Go inspired by Resilience4j.
 | Half-open permitted probes | Yes | Yes |
 | Open state wait duration | Yes | Yes |
 | Automatic open->half-open transition | Yes | Yes |
+| Manual open->half-open transition | Yes | Yes (`TransitionToHalfOpen`) |
 | Ignore exceptions | Yes | Yes (predicate) |
 | Record exceptions (whitelist) | Yes | Yes (predicate) |
 | Typed event publishing | Yes | Yes |
@@ -415,13 +416,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 r := mux.NewRouter()
 
 cb := resilience.NewCircuitBreaker("http-cb")
-retry := resilience.NewRetry("http-retry", resilience.WithMaxAttempts(2))
 bh := resilience.NewBulkhead("http-bh", resilience.WithMaxConcurrentCalls(200))
 rl := resilience.NewRateLimiter("http-rl", resilience.WithLimitForPeriod(500), resilience.WithLimitRefreshPeriod(time.Second))
 
 r.Use(resilience.GorillaMuxMiddleware(resilience.MiddlewareConfig{
 	CircuitBreaker: cb,
-	Retry:          retry,
 	Bulkhead:       bh,
 	RateLimiter:    rl,
 }))
@@ -438,13 +437,11 @@ gin.SetMode(gin.ReleaseMode)
 router := gin.New()
 
 cb := resilience.NewCircuitBreaker("gin-cb")
-retry := resilience.NewRetry("gin-retry", resilience.WithMaxAttempts(2))
 bh := resilience.NewBulkhead("gin-bh", resilience.WithMaxConcurrentCalls(200))
 rl := resilience.NewRateLimiter("gin-rl", resilience.WithLimitForPeriod(500), resilience.WithLimitRefreshPeriod(time.Second))
 
 router.Use(resilience.GinMiddleware(resilience.MiddlewareConfig{
 	CircuitBreaker: cb,
-	Retry:          retry,
 	Bulkhead:       bh,
 	RateLimiter:    rl,
 }))
@@ -453,6 +450,8 @@ router.GET("/v1/orders/:id", func(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"id": c.Param("id")})
 })
 ```
+
+> Middleware note: inbound HTTP middleware intentionally does **not** apply retries to handlers, because retrying after a response is partially/fully written can cause duplicate side effects and invalid HTTP writes.
 
 ### 5) OpenTelemetry metrics export bridge
 
@@ -506,7 +505,7 @@ See runnable `examples/otel-env/main.go` and `examples/otel-env/.env.example`.
 | `SlowCallDurationThreshold` | `time.Duration` | `60s` | Calls over this duration are slow |
 | `PermittedNumberOfCallsInHalfOpen` | `int` | `10` | Allowed probes in half-open |
 | `WaitDurationInOpenState` | `time.Duration` | `60s` | Open-state wait before half-open |
-| `AutomaticTransitionFromOpenToHalfOpen` | `bool` | `true` | Automatic transition behavior |
+| `AutomaticTransitionFromOpenToHalfOpen` | `bool` | `true` | If `false`, open state requires explicit `TransitionToHalfOpen()` call before probe requests are allowed |
 | `RecordErrorPredicate` | `func(error) bool` | `nil` | Whitelist of failure errors |
 | `IgnoreErrorPredicate` | `func(error) bool` | `nil` | Excluded errors |
 
