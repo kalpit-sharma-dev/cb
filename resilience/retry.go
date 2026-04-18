@@ -27,8 +27,8 @@ type RetryMetrics struct {
 }
 
 type retryObserver interface {
-	OnRetryAttempt(name string, attempt int, err error)
-	OnRetryResult(name string, attempts int, err error)
+	OnRetryAttempt(ctx context.Context, name string, attempt int, err error)
+	OnRetryResult(ctx context.Context, name string, attempts int, err error)
 }
 
 // Retry retries failed operations based on policy.
@@ -70,19 +70,19 @@ func (r *Retry) addObserver(observer retryObserver) {
 	r.observers = append(r.observers, observer)
 }
 
-func (r *Retry) notifyRetryAttempt(attempt int, err error) {
+func (r *Retry) notifyRetryAttempt(ctx context.Context, attempt int, err error) {
 	r.observersMu.RLock()
 	defer r.observersMu.RUnlock()
 	for _, observer := range r.observers {
-		observer.OnRetryAttempt(r.name, attempt, err)
+		observer.OnRetryAttempt(ctx, r.name, attempt, err)
 	}
 }
 
-func (r *Retry) notifyRetryResult(attempts int, err error) {
+func (r *Retry) notifyRetryResult(ctx context.Context, attempts int, err error) {
 	r.observersMu.RLock()
 	defer r.observersMu.RUnlock()
 	for _, observer := range r.observers {
-		observer.OnRetryResult(r.name, attempts, err)
+		observer.OnRetryResult(ctx, r.name, attempts, err)
 	}
 }
 
@@ -136,39 +136,39 @@ func (r *Retry) Execute(ctx context.Context, fn func(context.Context) (interface
 		attempts = attempt
 		if err := ctx.Err(); err != nil {
 			r.totalFailures.Add(1)
-			r.notifyRetryResult(attempts-1, err)
+			r.notifyRetryResult(ctx, attempts-1, err)
 			return nil, err
 		}
 		r.totalAttempts.Add(1)
 		result, err := fn(ctx)
 		if err == nil {
 			r.totalSuccesses.Add(1)
-			r.notifyRetryResult(attempts, nil)
+			r.notifyRetryResult(ctx, attempts, nil)
 			return result, nil
 		}
 		lastErr = err
 		if !r.shouldRetry(err) || attempt == r.config.MaxAttempts {
 			r.totalFailures.Add(1)
-			r.notifyRetryResult(attempts, err)
+			r.notifyRetryResult(ctx, attempts, err)
 			return result, err
 		}
 
 		r.totalRetries.Add(1)
-		r.notifyRetryAttempt(attempt, err)
+		r.notifyRetryAttempt(ctx, attempt, err)
 		if r.config.OnRetry != nil {
 			r.config.OnRetry(attempt, err)
 		}
 		if wait := r.backoffFor(attempt); wait > 0 {
 			if sleepErr := r.clock.Sleep(ctx, wait); sleepErr != nil {
 				r.totalFailures.Add(1)
-				r.notifyRetryResult(attempts, sleepErr)
+				r.notifyRetryResult(ctx, attempts, sleepErr)
 				return nil, sleepErr
 			}
 		}
 	}
 	if attempts > 0 {
 		r.totalFailures.Add(1)
-		r.notifyRetryResult(attempts, lastErr)
+		r.notifyRetryResult(ctx, attempts, lastErr)
 	}
 	return nil, lastErr
 }

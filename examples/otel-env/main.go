@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
+	mathrand "math/rand"
 	"net/url"
 	"os"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 )
 
 func main() {
+	seedPseudoRandom()
 	cfg := loadConfig()
 	shutdown, err := setupOTel(cfg)
 	if err != nil {
@@ -87,7 +90,7 @@ func main() {
 	deadline := time.Now().Add(cfg.RunDuration)
 	for time.Now().Before(deadline) {
 		_, err := resilience.Decorate(func(ctx context.Context) (interface{}, error) {
-			roll := rand.Intn(100)
+			roll := mathrand.Intn(100)
 			switch {
 			case roll < 20:
 				return nil, errors.New("transient timeout")
@@ -110,6 +113,16 @@ func main() {
 		time.Sleep(cfg.LoopDelay)
 	}
 	log.Println("example completed")
+}
+
+func seedPseudoRandom() {
+	var seedBytes [8]byte
+	if _, err := cryptorand.Read(seedBytes[:]); err != nil {
+		mathrand.Seed(time.Now().UnixNano())
+		return
+	}
+	seed := int64(binary.LittleEndian.Uint64(seedBytes[:]))
+	mathrand.Seed(seed)
 }
 
 type config struct {

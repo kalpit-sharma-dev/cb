@@ -151,6 +151,11 @@ type CircuitBreaker struct {
 	gb        *gobreaker.TwoStepCircuitBreaker
 	stateMu   sync.RWMutex
 	state     State
+
+	manualTransitionMu      sync.Mutex
+	manualHalfOpenRequested bool
+	lastCtxMu               sync.RWMutex
+	lastCtx                 context.Context
 }
 
 // NewCircuitBreaker builds a new circuit breaker instance.
@@ -173,7 +178,10 @@ func NewCircuitBreaker(name string, opts ...Option) *CircuitBreaker {
 
 	timeout := cfg.WaitDurationInOpenState
 	if !cfg.AutomaticTransitionFromOpenToHalfOpen {
-		timeout = 365 * 24 * time.Hour
+		// Keep gobreaker ready for an immediate OPEN->HALF_OPEN transition when a
+		// manual probe is requested. Requests are still blocked in Execute() until
+		// TransitionToHalfOpen() is called.
+		timeout = time.Nanosecond
 	}
 
 	settings := gobreaker.Settings{
@@ -191,17 +199,26 @@ func NewCircuitBreaker(name string, opts ...Option) *CircuitBreaker {
 			fromState := mapState(from)
 			toState := mapState(to)
 			cb.setState(toState)
+			if toState == StateOpen || toState == StateClosed {
+				cb.manualHalfOpenRequested.Store(false)
+			}
 			if toState == StateHalfOpen || toState == StateClosed {
 				cb.window.Reset()
 				cb.updateSnapshot(aggregate{})
 			}
-			cb.publisher.PublishStateChange(StateChangeEvent{Name: name, From: fromState, To: toState})
+			cb.publisher.PublishStateChange(StateChangeEvent{
+				Context: cb.lastContext(),
+				Name:    name,
+				From:    fromState,
+				To:      toState,
+			})
 		},
 		// Required by task: classify errors externally.
 		IsSuccessful: func(error) bool { return true },
 	}
 
 	cb.gb = gobreaker.NewTwoStepCircuitBreaker(settings)
+	cb.lastCtx = context.Background()
 	cb.updateSnapshot(cb.window.Aggregate(cb.clock.Now()))
 	return cb
 }
@@ -273,6 +290,24 @@ func (cb *CircuitBreaker) AddListener(listener EventListener) {
 	cb.publisher.AddListener(listener)
 }
 
+// TransitionToHalfOpen requests a probe transition when automatic transition is
+// disabled. The next caller will perform the OPEN -> HALF_OPEN probe.
+func (cb *CircuitBreaker) TransitionToHalfOpen() bool {
+	if cb.config.AutomaticTransitionFromOpenToHalfOpen {
+		return false
+	}
+	if cb.State() != StateOpen {
+		return false
+	}
+	cb.manualTransitionMu.Lock()
+	defer cb.manualTransitionMu.Unlock()
+	if cb.manualHalfOpenRequested {
+		return false
+	}
+	cb.manualHalfOpenRequested = true
+	return true
+}
+
 // Name returns the circuit-breaker name.
 func (cb *CircuitBreaker) Name() string {
 	return cb.name
@@ -321,24 +356,22 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, fn func(context.Context) 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cb.setLastContext(ctx)
 
 	started := cb.clock.Now()
-	done, err := cb.gb.Allow()
+	done, err := cb.allow()
 	if err != nil {
-		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-			return nil, ErrCircuitOpen
-		}
 		return nil, err
 	}
 
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		record, _ := cb.recordCall(started, cb.clock.Now(), ctxErr)
+		record, _ := cb.recordCall(ctx, started, cb.clock.Now(), ctxErr)
 		done(!(record.counted && (record.failed || record.slow)))
 		return nil, ctxErr
 	}
 
 	result, callErr := fn(ctx)
-	record, agg := cb.recordCall(started, cb.clock.Now(), callErr)
+	record, agg := cb.recordCall(ctx, started, cb.clock.Now(), callErr)
 
 	failForState := record.counted && (record.failed || record.slow)
 	if !failForState && record.counted && cb.State() == StateClosed {
@@ -355,7 +388,52 @@ func (cb *CircuitBreaker) Execute(ctx context.Context, fn func(context.Context) 
 	return result, nil
 }
 
-func (cb *CircuitBreaker) recordCall(start time.Time, end time.Time, callErr error) (callRecord, aggregate) {
+func (cb *CircuitBreaker) allow() (func(bool), error) {
+	manualMode := !cb.config.AutomaticTransitionFromOpenToHalfOpen
+	consumedManualTransition := false
+	if manualMode && cb.State() == StateOpen {
+		cb.manualTransitionMu.Lock()
+		if !cb.manualHalfOpenRequested {
+			cb.manualTransitionMu.Unlock()
+			return nil, ErrCircuitOpen
+		}
+		cb.manualHalfOpenRequested = false
+		cb.manualTransitionMu.Unlock()
+		consumedManualTransition = true
+	}
+
+	done, err := cb.gb.Allow()
+	if err != nil {
+		if consumedManualTransition && (errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests)) {
+			cb.manualTransitionMu.Lock()
+			cb.manualHalfOpenRequested = true
+			cb.manualTransitionMu.Unlock()
+		}
+		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
+			return nil, ErrCircuitOpen
+		}
+		return nil, err
+	}
+	return done, nil
+}
+
+func (cb *CircuitBreaker) lastContext() context.Context {
+	cb.lastCtxMu.RLock()
+	defer cb.lastCtxMu.RUnlock()
+	ctx := cb.lastCtx
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
+}
+
+func (cb *CircuitBreaker) setLastContext(ctx context.Context) {
+	cb.lastCtxMu.Lock()
+	defer cb.lastCtxMu.Unlock()
+	cb.lastCtx = ctx
+}
+
+func (cb *CircuitBreaker) recordCall(ctx context.Context, start time.Time, end time.Time, callErr error) (callRecord, aggregate) {
 	duration := end.Sub(start)
 	counted, failed, ignored := cb.classify(callErr)
 	slow := counted && duration >= cb.config.SlowCallDurationThreshold
@@ -374,7 +452,7 @@ func (cb *CircuitBreaker) recordCall(start time.Time, end time.Time, callErr err
 	}
 	cb.updateSnapshot(agg)
 
-	event := CallEvent{Name: cb.name, Duration: duration, Err: callErr}
+	event := CallEvent{Context: ctx, Name: cb.name, Duration: duration, Err: callErr}
 	switch {
 	case ignored:
 		cb.publisher.PublishIgnored(event)

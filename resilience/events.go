@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -16,6 +17,7 @@ type EventListener interface {
 
 // CallEvent describes the outcome of an invocation.
 type CallEvent struct {
+	Context  context.Context
 	Name     string
 	Duration time.Duration
 	Err      error
@@ -23,9 +25,10 @@ type CallEvent struct {
 
 // StateChangeEvent captures a circuit-breaker state transition.
 type StateChangeEvent struct {
-	Name string
-	From State
-	To   State
+	Context context.Context
+	Name    string
+	From    State
+	To      State
 }
 
 type eventPublisher struct {

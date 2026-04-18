@@ -90,6 +90,84 @@ func (l *testListener) OnStateChange(event StateChangeEvent) {
 	l.stateChanges = append(l.stateChanges, event)
 }
 
+type observerContextKey struct{}
+
+type retryObserverProbe struct {
+	mu         sync.Mutex
+	attemptCtx context.Context
+	resultCtx  context.Context
+}
+
+func (p *retryObserverProbe) OnRetryAttempt(ctx context.Context, _ string, _ int, _ error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attemptCtx = ctx
+}
+
+func (p *retryObserverProbe) OnRetryResult(ctx context.Context, _ string, _ int, _ error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resultCtx = ctx
+}
+
+type bulkheadObserverProbe struct {
+	mu      sync.Mutex
+	lastCtx context.Context
+}
+
+func (p *bulkheadObserverProbe) OnBulkheadCall(ctx context.Context, _ string, _ bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastCtx = ctx
+}
+
+type rateLimiterObserverProbe struct {
+	mu      sync.Mutex
+	lastCtx context.Context
+}
+
+func (p *rateLimiterObserverProbe) OnRateLimit(ctx context.Context, _ string, _ bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastCtx = ctx
+}
+
+type contextCapturingListener struct {
+	mu           sync.Mutex
+	lastCallCtx  context.Context
+	lastStateCtx context.Context
+}
+
+func (l *contextCapturingListener) OnSuccess(event CallEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastCallCtx = event.Context
+}
+
+func (l *contextCapturingListener) OnFailure(event CallEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastCallCtx = event.Context
+}
+
+func (l *contextCapturingListener) OnSlowCall(event CallEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastCallCtx = event.Context
+}
+
+func (l *contextCapturingListener) OnIgnored(event CallEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastCallCtx = event.Context
+}
+
+func (l *contextCapturingListener) OnStateChange(event StateChangeEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lastStateCtx = event.Context
+}
+
 func TestCircuitBreaker_CountBased_OpensOnFailureRate(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -282,6 +360,50 @@ func TestCircuitBreaker_HalfOpen_ReOpensOnFailure(t *testing.T) {
 				t.Fatalf("expected OPEN, got %s", cb.State())
 			}
 		})
+	}
+}
+
+func TestCircuitBreaker_ManualTransitionFromOpenToHalfOpen(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker("cb-manual-transition",
+		WithSlidingWindowSize(2),
+		WithMinimumNumberOfCalls(2),
+		WithFailureRateThreshold(50),
+		WithPermittedNumberOfCallsInHalfOpenState(1),
+		WithWaitDurationInOpenState(20*time.Millisecond),
+		WithAutomaticTransitionFromOpenToHalfOpen(false),
+	)
+
+	for i := 0; i < 2; i++ {
+		_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+			return nil, errors.New("fail")
+		})
+	}
+	if cb.State() != StateOpen {
+		t.Fatalf("expected OPEN after failures, got %s", cb.State())
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	_, err := cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+		return "unexpected", nil
+	})
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected ErrCircuitOpen before manual transition, got %v", err)
+	}
+
+	if !cb.TransitionToHalfOpen() {
+		t.Fatalf("expected manual transition request to succeed")
+	}
+
+	_, err = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("expected probe execution to pass after manual transition, got %v", err)
+	}
+	if cb.State() != StateClosed {
+		t.Fatalf("expected CLOSED after successful half-open probe, got %s", cb.State())
 	}
 }
 
@@ -512,6 +634,97 @@ func TestRetry_RespectsRetryOnPredicate(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_EventsCarryExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	cb := NewCircuitBreaker("cb-context-events",
+		WithSlidingWindowSize(2),
+		WithMinimumNumberOfCalls(2),
+		WithFailureRateThreshold(50),
+	)
+	listener := &contextCapturingListener{}
+	cb.AddListener(listener)
+
+	ctx := context.WithValue(context.Background(), observerContextKey{}, "ctx-marker")
+	for i := 0; i < 2; i++ {
+		_, _ = cb.Execute(ctx, func(context.Context) (interface{}, error) {
+			return nil, errors.New("boom")
+		})
+	}
+
+	listener.mu.Lock()
+	defer listener.mu.Unlock()
+	if listener.lastCallCtx != ctx {
+		t.Fatalf("expected call events to include execution context")
+	}
+	if listener.lastStateCtx != ctx {
+		t.Fatalf("expected state-change events to include execution context")
+	}
+}
+
+func TestRetry_ObserverReceivesExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	retry := NewRetry("retry-context", WithMaxAttempts(2))
+	probe := &retryObserverProbe{}
+	retry.addObserver(probe)
+
+	ctx := context.WithValue(context.Background(), observerContextKey{}, "ctx-marker")
+	_, _ = retry.Execute(ctx, func(context.Context) (interface{}, error) {
+		return nil, errors.New("retry-me")
+	})
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if probe.attemptCtx != ctx {
+		t.Fatalf("expected retry attempt observer to receive execution context")
+	}
+	if probe.resultCtx != ctx {
+		t.Fatalf("expected retry result observer to receive execution context")
+	}
+}
+
+func TestBulkhead_ObserverReceivesExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	bh := NewBulkhead("bulkhead-context")
+	probe := &bulkheadObserverProbe{}
+	bh.addObserver(probe)
+
+	ctx := context.WithValue(context.Background(), observerContextKey{}, "ctx-marker")
+	_, err := bh.Execute(ctx, func(context.Context) (interface{}, error) {
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("expected bulkhead execution to succeed: %v", err)
+	}
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if probe.lastCtx != ctx {
+		t.Fatalf("expected bulkhead observer to receive execution context")
+	}
+}
+
+func TestRateLimiter_ObserverReceivesExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	rl := NewRateLimiter("rl-context", WithLimitForPeriod(5), WithLimitRefreshPeriod(time.Second))
+	probe := &rateLimiterObserverProbe{}
+	rl.addObserver(probe)
+
+	ctx := context.WithValue(context.Background(), observerContextKey{}, "ctx-marker")
+	if err := rl.Wait(ctx); err != nil {
+		t.Fatalf("expected rate limiter wait to succeed: %v", err)
+	}
+
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if probe.lastCtx != ctx {
+		t.Fatalf("expected rate limiter observer to receive execution context")
+	}
+}
+
 func TestBulkhead_RejectsBeyondConcurrencyLimit(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -653,6 +866,30 @@ func TestMiddleware_GorillaMux(t *testing.T) {
 	}
 }
 
+func TestMiddleware_GorillaMux_DoesNotRetryHandlerExecution(t *testing.T) {
+	t.Parallel()
+
+	var calls int32
+	cfg := MiddlewareConfig{
+		Retry: NewRetry("mw-retry-no-retry", WithMaxAttempts(3)),
+	}
+	wrapped := GorillaMuxMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rr.Code)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected handler to execute once, got %d", got)
+	}
+}
+
 func TestMiddleware_Gin(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -687,6 +924,32 @@ func TestMiddleware_Gin(t *testing.T) {
 				t.Fatalf("expected %d, got %d", tt.wantStatus, rr.Code)
 			}
 		})
+	}
+}
+
+func TestMiddleware_Gin_DoesNotRetryHandlerExecution(t *testing.T) {
+	t.Parallel()
+
+	var calls int32
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(GinMiddleware(MiddlewareConfig{
+		Retry: NewRetry("gin-retry-no-retry", WithMaxAttempts(3)),
+	}))
+	r.GET("/", func(c *gin.Context) {
+		atomic.AddInt32(&calls, 1)
+		c.AbortWithStatus(http.StatusInternalServerError)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status 500, got %d", rr.Code)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected handler to execute once, got %d", got)
 	}
 }
 

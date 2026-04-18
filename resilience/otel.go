@@ -213,7 +213,10 @@ func (b *OTelBridge) snapshotCopy() snapshotSources {
 	}
 }
 
-func (b *OTelBridge) OnRetryAttempt(name string, attempt int, err error) {
+func (b *OTelBridge) OnRetryAttempt(ctx context.Context, name string, attempt int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	attrs := []attribute.KeyValue{
 		attribute.String("name", name),
 		attribute.String("event", "retry_attempt"),
@@ -222,15 +225,18 @@ func (b *OTelBridge) OnRetryAttempt(name string, attempt int, err error) {
 	if err != nil {
 		attrs = append(attrs, attribute.String("error", err.Error()))
 	}
-	b.eventRetries.Add(context.Background(), 1, metric.WithAttributes(attrs...))
+	b.eventRetries.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-func (b *OTelBridge) OnRetryResult(name string, attempts int, err error) {
+func (b *OTelBridge) OnRetryResult(ctx context.Context, name string, attempts int, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
 	}
-	b.eventRetries.Add(context.Background(), 1, metric.WithAttributes(
+	b.eventRetries.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", name),
 		attribute.String("event", "retry_result"),
 		attribute.String("outcome", outcome),
@@ -238,23 +244,29 @@ func (b *OTelBridge) OnRetryResult(name string, attempts int, err error) {
 	))
 }
 
-func (b *OTelBridge) OnBulkheadCall(name string, admitted bool) {
+func (b *OTelBridge) OnBulkheadCall(ctx context.Context, name string, admitted bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	outcome := "admitted"
 	if !admitted {
 		outcome = "rejected"
 	}
-	b.eventBulkhead.Add(context.Background(), 1, metric.WithAttributes(
+	b.eventBulkhead.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", name),
 		attribute.String("outcome", outcome),
 	))
 }
 
-func (b *OTelBridge) OnRateLimit(name string, allowed bool) {
+func (b *OTelBridge) OnRateLimit(ctx context.Context, name string, allowed bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	outcome := "allowed"
 	if !allowed {
 		outcome = "denied"
 	}
-	b.eventRateLimiter.Add(context.Background(), 1, metric.WithAttributes(
+	b.eventRateLimiter.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", name),
 		attribute.String("outcome", outcome),
 	))
@@ -265,14 +277,22 @@ type otelCBListener struct {
 	name   string
 }
 
-func (l *otelCBListener) OnSuccess(_ CallEvent) {
-	l.bridge.eventCBCalls.Add(context.Background(), 1, metric.WithAttributes(
+func (l *otelCBListener) OnSuccess(event CallEvent) {
+	ctx := event.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.bridge.eventCBCalls.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", l.name),
 		attribute.String("event", "success"),
 	))
 }
 
 func (l *otelCBListener) OnFailure(event CallEvent) {
+	ctx := event.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	attrs := []attribute.KeyValue{
 		attribute.String("name", l.name),
 		attribute.String("event", "failure"),
@@ -280,25 +300,37 @@ func (l *otelCBListener) OnFailure(event CallEvent) {
 	if event.Err != nil {
 		attrs = append(attrs, attribute.String("error", event.Err.Error()))
 	}
-	l.bridge.eventCBCalls.Add(context.Background(), 1, metric.WithAttributes(attrs...))
+	l.bridge.eventCBCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-func (l *otelCBListener) OnSlowCall(_ CallEvent) {
-	l.bridge.eventCBCalls.Add(context.Background(), 1, metric.WithAttributes(
+func (l *otelCBListener) OnSlowCall(event CallEvent) {
+	ctx := event.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.bridge.eventCBCalls.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", l.name),
 		attribute.String("event", "slow"),
 	))
 }
 
-func (l *otelCBListener) OnIgnored(_ CallEvent) {
-	l.bridge.eventCBCalls.Add(context.Background(), 1, metric.WithAttributes(
+func (l *otelCBListener) OnIgnored(event CallEvent) {
+	ctx := event.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.bridge.eventCBCalls.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", l.name),
 		attribute.String("event", "ignored"),
 	))
 }
 
 func (l *otelCBListener) OnStateChange(event StateChangeEvent) {
-	l.bridge.eventCBState.Add(context.Background(), 1, metric.WithAttributes(
+	ctx := event.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.bridge.eventCBState.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("name", l.name),
 		attribute.String("from", string(event.From)),
 		attribute.String("to", string(event.To)),

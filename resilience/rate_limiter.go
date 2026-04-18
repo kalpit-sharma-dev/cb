@@ -25,7 +25,7 @@ type RateLimiterMetrics struct {
 }
 
 type rateLimiterObserver interface {
-	OnRateLimit(name string, allowed bool)
+	OnRateLimit(ctx context.Context, name string, allowed bool)
 }
 
 // RateLimiter wraps x/time/rate.Limiter.
@@ -56,11 +56,11 @@ func (r *RateLimiter) addObserver(observer rateLimiterObserver) {
 	r.observers = append(r.observers, observer)
 }
 
-func (r *RateLimiter) notify(allowed bool) {
+func (r *RateLimiter) notify(ctx context.Context, allowed bool) {
 	r.observersMu.RLock()
 	defer r.observersMu.RUnlock()
 	for _, observer := range r.observers {
-		observer.OnRateLimit(r.name, allowed)
+		observer.OnRateLimit(ctx, r.name, allowed)
 	}
 }
 
@@ -124,11 +124,11 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 	if r.config.TimeoutDuration <= 0 {
 		if !r.limiter.Allow() {
 			r.deniedCalls.Add(1)
-			r.notify(false)
+			r.notify(ctx, false)
 			return ErrRateLimitExceeded
 		}
 		r.allowedCalls.Add(1)
-		r.notify(true)
+		r.notify(ctx, true)
 		return nil
 	}
 
@@ -141,10 +141,10 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 			return ctx.Err()
 		}
 		r.deniedCalls.Add(1)
-		r.notify(false)
+		r.notify(ctx, false)
 		return ErrRateLimitExceeded
 	}
 	r.allowedCalls.Add(1)
-	r.notify(true)
+	r.notify(ctx, true)
 	return nil
 }

@@ -6,15 +6,20 @@ PROFILE="${PROFILE:-mixed}"
 DURATION_SECONDS="${DURATION_SECONDS:-60}"
 CONCURRENCY="${CONCURRENCY:-20}"
 REQUEST_DELAY_MS="${REQUEST_DELAY_MS:-0}"
+REQUEST_DELAY_SEC="0"
 
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required" >&2
   exit 1
 fi
 
-if ! [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]]; then
-  echo "DURATION_SECONDS and CONCURRENCY must be integers" >&2
+if ! [[ "$DURATION_SECONDS" =~ ^[0-9]+$ ]] || ! [[ "$CONCURRENCY" =~ ^[0-9]+$ ]] || ! [[ "$REQUEST_DELAY_MS" =~ ^[0-9]+$ ]]; then
+  echo "DURATION_SECONDS, CONCURRENCY, and REQUEST_DELAY_MS must be integers" >&2
   exit 1
+fi
+
+if (( REQUEST_DELAY_MS > 0 )); then
+  printf -v REQUEST_DELAY_SEC "%d.%03d" $((REQUEST_DELAY_MS / 1000)) $((REQUEST_DELAY_MS % 1000))
 fi
 
 case "$PROFILE" in
@@ -88,7 +93,7 @@ worker() {
     printf "%s\n" "$status"
 
     if (( REQUEST_DELAY_MS > 0 )); then
-      sleep "$(awk "BEGIN {printf \"%.3f\", ${REQUEST_DELAY_MS}/1000}")"
+      sleep "$REQUEST_DELAY_SEC"
     fi
   done
 }
@@ -120,7 +125,7 @@ done < "$tmpfile"
 if (( total == 0 )); then
   success_rate="0.00"
 else
-  success_rate=$(awk "BEGIN {printf \"%.2f\", ($ok/$total)*100}")
+  success_rate=$(printf "%.2f" "$((ok * 10000 / total))e-2")
 fi
 
 echo "Load complete"

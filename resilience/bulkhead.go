@@ -22,7 +22,7 @@ type BulkheadMetrics struct {
 }
 
 type bulkheadObserver interface {
-	OnBulkheadCall(name string, admitted bool)
+	OnBulkheadCall(ctx context.Context, name string, admitted bool)
 }
 
 // Bulkhead is a semaphore-based concurrency limiter.
@@ -53,11 +53,11 @@ func (b *Bulkhead) addObserver(observer bulkheadObserver) {
 	b.observers = append(b.observers, observer)
 }
 
-func (b *Bulkhead) notify(admitted bool) {
+func (b *Bulkhead) notify(ctx context.Context, admitted bool) {
 	b.observersMu.RLock()
 	defer b.observersMu.RUnlock()
 	for _, observer := range b.observers {
-		observer.OnBulkheadCall(b.name, admitted)
+		observer.OnBulkheadCall(ctx, b.name, admitted)
 	}
 }
 
@@ -96,10 +96,10 @@ func (b *Bulkhead) Execute(ctx context.Context, fn func(context.Context) (interf
 	release, err := b.acquire(ctx)
 	if err != nil {
 		b.totalRejectedCalls.Add(1)
-		b.notify(false)
+		b.notify(ctx, false)
 		return nil, err
 	}
-	b.notify(true)
+	b.notify(ctx, true)
 	defer release()
 	return fn(ctx)
 }
