@@ -87,6 +87,14 @@ The example app emits resilience events/snapshots through the bridge using metri
 
 - `resilience.demo.*`
 
+Convenience commands:
+
+```bash
+make demo-up
+make demo-run-example
+make demo-down
+```
+
 Example PromQL:
 
 ```promql
@@ -95,6 +103,54 @@ rate(resilience_demo_retry_events_total[1m])
 
 ```promql
 resilience_demo_cb_failure_rate
+```
+
+## Prebuilt Grafana alert rules
+
+Provisioned alert rules are included under:
+
+- `observability/grafana/provisioning/alerting/resilience-alerts.yaml`
+
+Included alerts:
+
+- **Resilience High Failure Rate**
+  - Trigger: `max(resilience_demo_cb_failure_rate) > 70` for 2m
+- **Resilience High RateLimiter Denied Rate**
+  - Trigger: `sum(rate(resilience_demo_rate_limiter_events_total{outcome="denied"}[1m])) > 10` for 2m
+
+Default contact point/policy provisioning files:
+
+- `observability/grafana/provisioning/alerting/contact-points.yaml`
+- `observability/grafana/provisioning/alerting/notification-policies.yaml`
+
+You can replace the default contact point with Slack/PagerDuty/Webhook receivers in those files.
+
+## Load generator script
+
+Script: `scripts/load.sh`
+
+Profiles:
+
+- `happy`   -> mostly successful traffic
+- `failure` -> mostly `/demo?fail=1`
+- `slow`    -> mostly `/demo?slow=1`
+- `mixed`   -> blend of success/slow/failure
+
+Examples:
+
+```bash
+# against gin example
+BASE_URL=http://localhost:8082 PROFILE=mixed DURATION_SECONDS=120 CONCURRENCY=40 ./scripts/load.sh
+```
+
+```bash
+# aggressive failure profile
+BASE_URL=http://localhost:8082 PROFILE=failure DURATION_SECONDS=90 CONCURRENCY=30 ./scripts/load.sh
+```
+
+```bash
+# gentle happy traffic with per-request delay
+BASE_URL=http://localhost:8082 PROFILE=happy DURATION_SECONDS=60 CONCURRENCY=10 REQUEST_DELAY_MS=50 ./scripts/load.sh
 ```
 
 ## Quick start

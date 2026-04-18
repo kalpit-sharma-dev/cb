@@ -1,0 +1,123 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: resilience-alerts
+    folder: Resilience
+    interval: 30s
+    rules:
+      - uid: resilience-high-failure-rate
+        title: Resilience High Failure Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: max(resilience_demo_cb_failure_rate)
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 70
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                name: Expression
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: resilience-overview
+        panelId: 1
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: Circuit breaker failure rate exceeded 70%
+        labels:
+          severity: warning
+          service: resilience
+        isPaused: false
+
+      - uid: resilience-high-denied-rate
+        title: Resilience High RateLimiter Denied Rate
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(resilience_demo_rate_limiter_events_total{outcome="denied"}[1m]))
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: true
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 10
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                name: Expression
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: resilience-overview
+        panelId: 5
+        noDataState: NoData
+        execErrState: Error
+        for: 2m
+        annotations:
+          summary: Rate limiter denied rate exceeded 10 req/s
+        labels:
+          severity: warning
+          service: resilience
+        isPaused: false
