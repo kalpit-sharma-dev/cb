@@ -36,8 +36,12 @@
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
       "targets": [
         {
-          "expr": "rate(resilience_demo_retry_events_total[1m])",
-          "legendFormat": "{{name}} {{event}}"
+          "expr": "sum by (name) (rate(resilience_demo_retry_events_total{event=\"retry_attempt\"}[1m]))",
+          "legendFormat": "{{name}} retry_attempt"
+        },
+        {
+          "expr": "sum by (name, outcome) (rate(resilience_demo_retry_events_total{event=\"retry_result\"}[1m]))",
+          "legendFormat": "{{name}} retry_result {{outcome}}"
         }
       ]
     },
@@ -47,7 +51,7 @@
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
       "targets": [
         {
-          "expr": "rate(resilience_demo_bulkhead_events_total[1m])",
+          "expr": "sum by (name, outcome) (rate(resilience_demo_bulkhead_events_total[1m]))",
           "legendFormat": "{{name}} {{outcome}}"
         }
       ]
@@ -58,7 +62,7 @@
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
       "targets": [
         {
-          "expr": "rate(resilience_demo_rate_limiter_events_total[1m])",
+          "expr": "sum by (name, outcome) (rate(resilience_demo_rate_limiter_events_total[1m]))",
           "legendFormat": "{{name}} {{outcome}}"
         }
       ]
