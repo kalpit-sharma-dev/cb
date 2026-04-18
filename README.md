@@ -2,7 +2,7 @@
 
 Production-grade resilience primitives for Go inspired by Resilience4j.
 
-> Requires Go 1.25.3 or newer.
+> Go version: **1.25.3+**
 
 ## Feature comparison vs Resilience4j
 
@@ -31,6 +31,70 @@ go get github.com/sony/gobreaker
 go get golang.org/x/time/rate
 go get github.com/gin-gonic/gin
 go get go.opentelemetry.io/otel/metric
+```
+
+## Runnable examples
+
+The repository includes runnable programs:
+
+- `examples/mux` — Gorilla Mux middleware integration
+- `examples/gin` — Gin middleware integration
+- `examples/otel-env` — full env-driven configuration + OpenTelemetry bridge
+
+Run them:
+
+```bash
+go run ./examples/mux
+```
+
+```bash
+go run ./examples/gin
+```
+
+```bash
+go run ./examples/otel-env
+```
+
+### Example endpoints
+
+- Mux example: `http://localhost:8081/health`, `http://localhost:8081/demo?fail=1`
+- Gin example: `http://localhost:8082/health`, `http://localhost:8082/demo?slow=1`
+
+## Docker Compose observability demo (OTEL -> Prometheus -> Grafana)
+
+Included assets:
+
+- `docker-compose.yml`
+- `observability/otelcol/config.yaml`
+- `observability/prometheus.yml`
+- `observability/grafana/provisioning/...`
+- `observability/grafana/dashboards/resilience-overview.json`
+
+Start full stack:
+
+```bash
+docker compose up --build
+```
+
+Services:
+
+- OTEL Collector: `http://localhost:4318` (OTLP HTTP), `:4317` (OTLP gRPC)
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3000` (admin/admin)
+- Example producer: `otel-env-example` service in compose
+
+The example app emits resilience events/snapshots through the bridge using metric prefix:
+
+- `resilience.demo.*`
+
+Example PromQL:
+
+```promql
+rate(resilience_demo_retry_events_total[1m])
+```
+
+```promql
+resilience_demo_cb_failure_rate
 ```
 
 ## Quick start
@@ -339,7 +403,6 @@ router.GET("/v1/orders/:id", func(c *gin.Context) {
 ```go
 import (
 	"context"
-	"time"
 
 	"go.opentelemetry.io/otel"
 	"resilience/resilience"
@@ -371,192 +434,7 @@ func shutdownObs(ctx context.Context, bridge *resilience.OTelBridge) {
 
 ### 6) Full env-driven configuration example (all parameters)
 
-```go
-package main
-
-import (
-	"context"
-	"errors"
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
-	"time"
-
-	"resilience/resilience"
-)
-
-func getenvInt(key string, def int) int {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func getenvFloat(key string, def float64) float64 {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func getenvBool(key string, def bool) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-	if v == "" {
-		return def
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return def
-	}
-	return b
-}
-
-func getenvDuration(key string, def time.Duration) time.Duration {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return def
-	}
-	return d
-}
-
-func getenvString(key, def string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return def
-	}
-	return v
-}
-
-func main() {
-	// Circuit breaker env vars
-	cbName := getenvString("RES_CB_NAME", "orders-cb")
-	cbWindowType := strings.ToUpper(getenvString("RES_CB_SLIDING_WINDOW_TYPE", "COUNT_BASED"))
-	cbWindowSize := getenvInt("RES_CB_SLIDING_WINDOW_SIZE", 100)
-	cbMinCalls := getenvInt("RES_CB_MINIMUM_NUMBER_OF_CALLS", 100)
-	cbFailureRate := getenvFloat("RES_CB_FAILURE_RATE_THRESHOLD", 50)
-	cbSlowRate := getenvFloat("RES_CB_SLOW_CALL_RATE_THRESHOLD", 100)
-	cbSlowDuration := getenvDuration("RES_CB_SLOW_CALL_DURATION_THRESHOLD", 60*time.Second)
-	cbHalfOpenPermits := getenvInt("RES_CB_PERMITTED_CALLS_HALF_OPEN", 10)
-	cbOpenWait := getenvDuration("RES_CB_WAIT_DURATION_OPEN_STATE", 60*time.Second)
-	cbAutoTransition := getenvBool("RES_CB_AUTO_TRANSITION_OPEN_TO_HALF_OPEN", true)
-
-	windowType := resilience.CountBased
-	if cbWindowType == "TIME_BASED" {
-		windowType = resilience.TimeBased
-	}
-
-	cb := resilience.NewCircuitBreaker(cbName,
-		resilience.WithSlidingWindowType(windowType),
-		resilience.WithSlidingWindowSize(cbWindowSize),
-		resilience.WithMinimumNumberOfCalls(cbMinCalls),
-		resilience.WithFailureRateThreshold(cbFailureRate),
-		resilience.WithSlowCallRateThreshold(cbSlowRate),
-		resilience.WithSlowCallDurationThreshold(cbSlowDuration),
-		resilience.WithPermittedNumberOfCallsInHalfOpenState(cbHalfOpenPermits),
-		resilience.WithWaitDurationInOpenState(cbOpenWait),
-		resilience.WithAutomaticTransitionFromOpenToHalfOpen(cbAutoTransition),
-		resilience.WithIgnoreErrors(func(err error) bool {
-			// example: ignore business validation errors
-			return strings.Contains(strings.ToLower(err.Error()), "validation")
-		}),
-		resilience.WithRecordErrors(func(err error) bool {
-			// example: only record timeouts/connection errors
-			s := strings.ToLower(err.Error())
-			return strings.Contains(s, "timeout") || strings.Contains(s, "connection")
-		}),
-	)
-
-	// Retry env vars
-	retry := resilience.NewRetry(getenvString("RES_RETRY_NAME", "orders-retry"),
-		resilience.WithMaxAttempts(getenvInt("RES_RETRY_MAX_ATTEMPTS", 3)),
-		resilience.WithWaitDuration(getenvDuration("RES_RETRY_WAIT_DURATION", 200*time.Millisecond)),
-		resilience.WithExponentialBackoff(
-			getenvFloat("RES_RETRY_BACKOFF_MULTIPLIER", 2.0),
-			getenvDuration("RES_RETRY_MAX_INTERVAL", 5*time.Second),
-		),
-		resilience.WithRetryOn(func(err error) bool {
-			if err == nil {
-				return false
-			}
-			return !errors.Is(err, context.Canceled)
-		}),
-		resilience.WithOnRetry(func(attempt int, err error) {
-			fmt.Printf("retry attempt=%d err=%v\n", attempt, err)
-		}),
-	)
-
-	// Bulkhead env vars
-	bh := resilience.NewBulkhead(getenvString("RES_BH_NAME", "orders-bh"),
-		resilience.WithMaxConcurrentCalls(getenvInt("RES_BH_MAX_CONCURRENT_CALLS", 50)),
-		resilience.WithMaxWaitDuration(getenvDuration("RES_BH_MAX_WAIT_DURATION", 25*time.Millisecond)),
-	)
-
-	// Rate limiter env vars
-	rl := resilience.NewRateLimiter(getenvString("RES_RL_NAME", "orders-rl"),
-		resilience.WithLimitForPeriod(getenvInt("RES_RL_LIMIT_FOR_PERIOD", 200)),
-		resilience.WithLimitRefreshPeriod(getenvDuration("RES_RL_LIMIT_REFRESH_PERIOD", time.Second)),
-		resilience.WithTimeoutDuration(getenvDuration("RES_RL_TIMEOUT_DURATION", 20*time.Millisecond)),
-	)
-
-	// Use all decorators together
-	result, err := resilience.Decorate(func(ctx context.Context) (interface{}, error) {
-		// place your db/rest logic here
-		return "ok", nil
-	}).
-		WithRateLimiter(rl).
-		WithBulkhead(bh).
-		WithCircuitBreaker(cb).
-		WithRetry(retry).
-		Call(context.Background())
-
-	fmt.Printf("result=%v err=%v\n", result, err)
-}
-```
-
-Example `.env` values:
-
-```bash
-RES_CB_NAME=orders-cb
-RES_CB_SLIDING_WINDOW_TYPE=TIME_BASED
-RES_CB_SLIDING_WINDOW_SIZE=10
-RES_CB_MINIMUM_NUMBER_OF_CALLS=20
-RES_CB_FAILURE_RATE_THRESHOLD=50
-RES_CB_SLOW_CALL_RATE_THRESHOLD=80
-RES_CB_SLOW_CALL_DURATION_THRESHOLD=2s
-RES_CB_PERMITTED_CALLS_HALF_OPEN=5
-RES_CB_WAIT_DURATION_OPEN_STATE=30s
-RES_CB_AUTO_TRANSITION_OPEN_TO_HALF_OPEN=true
-
-RES_RETRY_NAME=orders-retry
-RES_RETRY_MAX_ATTEMPTS=3
-RES_RETRY_WAIT_DURATION=200ms
-RES_RETRY_BACKOFF_MULTIPLIER=2.0
-RES_RETRY_MAX_INTERVAL=2s
-
-RES_BH_NAME=orders-bh
-RES_BH_MAX_CONCURRENT_CALLS=50
-RES_BH_MAX_WAIT_DURATION=20ms
-
-RES_RL_NAME=orders-rl
-RES_RL_LIMIT_FOR_PERIOD=200
-RES_RL_LIMIT_REFRESH_PERIOD=1s
-RES_RL_TIMEOUT_DURATION=20ms
-```
+See runnable `examples/otel-env/main.go` and `examples/otel-env/.env.example`.
 
 ## Configuration reference
 
