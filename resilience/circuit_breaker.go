@@ -200,7 +200,9 @@ func NewCircuitBreaker(name string, opts ...Option) *CircuitBreaker {
 			toState := mapState(to)
 			cb.setState(toState)
 			if toState == StateOpen || toState == StateClosed {
-				cb.manualHalfOpenRequested.Store(false)
+				cb.manualTransitionMu.Lock()
+				cb.manualHalfOpenRequested = false
+				cb.manualTransitionMu.Unlock()
 			}
 			if toState == StateHalfOpen || toState == StateClosed {
 				cb.window.Reset()
