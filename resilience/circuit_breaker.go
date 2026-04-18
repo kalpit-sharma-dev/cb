@@ -273,6 +273,11 @@ func (cb *CircuitBreaker) AddListener(listener EventListener) {
 	cb.publisher.AddListener(listener)
 }
 
+// Name returns the circuit-breaker name.
+func (cb *CircuitBreaker) Name() string {
+	return cb.name
+}
+
 // State returns current state.
 func (cb *CircuitBreaker) State() State {
 	cb.stateMu.RLock()

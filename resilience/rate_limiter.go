@@ -2,6 +2,8 @@ package resilience
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -14,11 +16,62 @@ type RateLimiterConfig struct {
 	TimeoutDuration    time.Duration
 }
 
+// RateLimiterMetrics exposes runtime counters.
+type RateLimiterMetrics struct {
+	AllowedCalls   int64
+	DeniedCalls    int64
+	WaitingCalls   int64
+	LimitForPeriod int
+}
+
+type rateLimiterObserver interface {
+	OnRateLimit(name string, allowed bool)
+}
+
 // RateLimiter wraps x/time/rate.Limiter.
 type RateLimiter struct {
 	name    string
 	config  RateLimiterConfig
 	limiter *rate.Limiter
+
+	observersMu sync.RWMutex
+	observers   []rateLimiterObserver
+
+	allowedCalls atomic.Int64
+	deniedCalls  atomic.Int64
+	waitingCalls atomic.Int64
+}
+
+// Name returns the rate-limiter name.
+func (r *RateLimiter) Name() string {
+	return r.name
+}
+
+func (r *RateLimiter) addObserver(observer rateLimiterObserver) {
+	if observer == nil {
+		return
+	}
+	r.observersMu.Lock()
+	defer r.observersMu.Unlock()
+	r.observers = append(r.observers, observer)
+}
+
+func (r *RateLimiter) notify(allowed bool) {
+	r.observersMu.RLock()
+	defer r.observersMu.RUnlock()
+	for _, observer := range r.observers {
+		observer.OnRateLimit(r.name, allowed)
+	}
+}
+
+// Metrics returns a snapshot of rate limiter counters.
+func (r *RateLimiter) Metrics() RateLimiterMetrics {
+	return RateLimiterMetrics{
+		AllowedCalls:   r.allowedCalls.Load(),
+		DeniedCalls:    r.deniedCalls.Load(),
+		WaitingCalls:   r.waitingCalls.Load(),
+		LimitForPeriod: r.config.LimitForPeriod,
+	}
 }
 
 func WithLimitForPeriod(limit int) Option {
@@ -70,17 +123,28 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 	}
 	if r.config.TimeoutDuration <= 0 {
 		if !r.limiter.Allow() {
+			r.deniedCalls.Add(1)
+			r.notify(false)
 			return ErrRateLimitExceeded
 		}
+		r.allowedCalls.Add(1)
+		r.notify(true)
 		return nil
 	}
+
+	r.waitingCalls.Add(1)
+	defer r.waitingCalls.Add(-1)
 	ctxWait, cancel := context.WithTimeout(ctx, r.config.TimeoutDuration)
 	defer cancel()
 	if err := r.limiter.Wait(ctxWait); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		r.deniedCalls.Add(1)
+		r.notify(false)
 		return ErrRateLimitExceeded
 	}
+	r.allowedCalls.Add(1)
+	r.notify(true)
 	return nil
 }

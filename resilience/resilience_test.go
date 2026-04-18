@@ -3,10 +3,15 @@ package resilience
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/metric/noop"
 )
 
 type fakeClock struct {
@@ -608,6 +613,141 @@ func TestDecorator_FullChain(t *testing.T) {
 			}
 			if attempts != 2 {
 				t.Fatalf("expected 2 attempts, got %d", attempts)
+			}
+		})
+	}
+}
+
+func TestMiddleware_GorillaMux(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		handlerErr bool
+		wantStatus int
+	}{
+		{name: "successful request passes", handlerErr: false, wantStatus: http.StatusOK},
+		{name: "handler error mapped to 500", handlerErr: true, wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := MiddlewareConfig{
+				CircuitBreaker: NewCircuitBreaker("mw-cb", WithMinimumNumberOfCalls(1000)),
+				Retry:          NewRetry("mw-retry", WithMaxAttempts(1)),
+			}
+			wrapped := GorillaMuxMiddleware(cfg)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tt.handlerErr {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			rr := httptest.NewRecorder()
+			wrapped.ServeHTTP(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, rr.Code)
+			}
+		})
+	}
+}
+
+func TestMiddleware_Gin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		handlerErr bool
+		wantStatus int
+	}{
+		{name: "successful request passes", handlerErr: false, wantStatus: http.StatusOK},
+		{name: "handler error mapped to 500", handlerErr: true, wantStatus: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gin.SetMode(gin.TestMode)
+			r := gin.New()
+			r.Use(GinMiddleware(MiddlewareConfig{
+				CircuitBreaker: NewCircuitBreaker("gin-cb", WithMinimumNumberOfCalls(1000)),
+				Retry:          NewRetry("gin-retry", WithMaxAttempts(1)),
+			}))
+			r.GET("/", func(c *gin.Context) {
+				if tt.handlerErr {
+					c.AbortWithStatus(http.StatusInternalServerError)
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"ok": true})
+			})
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected %d, got %d", tt.wantStatus, rr.Code)
+			}
+		})
+	}
+}
+
+func TestOTelBridge_RegisterAndEvents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+	}{
+		{name: "bridge registers components and captures events"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			meter := noop.NewMeterProvider().Meter("test")
+			bridge, err := NewOTelBridge(OTelBridgeConfig{Meter: meter, MetricsPrefix: "resilience.test"})
+			if err != nil {
+				t.Fatalf("unexpected bridge error: %v", err)
+			}
+
+			cb := NewCircuitBreaker("otel-cb", WithSlidingWindowSize(2), WithMinimumNumberOfCalls(2), WithFailureRateThreshold(50))
+			r := NewRetry("otel-retry", WithMaxAttempts(2))
+			bh := NewBulkhead("otel-bh", WithMaxConcurrentCalls(1))
+			rl := NewRateLimiter("otel-rl", WithLimitForPeriod(1), WithLimitRefreshPeriod(time.Second), WithTimeoutDuration(0))
+
+			bridge.RegisterCircuitBreaker(cb)
+			bridge.RegisterRetry(r)
+			bridge.RegisterBulkhead(bh)
+			bridge.RegisterRateLimiter(rl)
+
+			_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+				return nil, errors.New("boom")
+			})
+			_, _ = cb.Execute(context.Background(), func(context.Context) (interface{}, error) {
+				return nil, nil
+			})
+			_, _ = r.Execute(context.Background(), func(context.Context) (interface{}, error) {
+				return nil, errors.New("retry")
+			})
+			_, _ = bh.Execute(context.Background(), func(context.Context) (interface{}, error) {
+				return nil, nil
+			})
+			_ = rl.Wait(context.Background())
+			_ = rl.Wait(context.Background())
+
+			// verify internal component metrics advanced, meaning bridge can observe snapshots.
+			if cb.Metrics().NumberOfBufferedCalls == 0 {
+				t.Fatalf("expected cb metrics to be populated")
+			}
+			if r.Metrics().TotalAttempts == 0 {
+				t.Fatalf("expected retry metrics to be populated")
+			}
+			if bh.Metrics().TotalCalls == 0 {
+				t.Fatalf("expected bulkhead metrics to be populated")
+			}
+			if rl.Metrics().AllowedCalls == 0 {
+				t.Fatalf("expected rate limiter metrics to be populated")
+			}
+
+			if err := bridge.Shutdown(context.Background()); err != nil {
+				t.Fatalf("unexpected shutdown error: %v", err)
 			}
 		})
 	}

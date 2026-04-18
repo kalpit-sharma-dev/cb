@@ -27,6 +27,8 @@ Production-grade resilience primitives for Go inspired by Resilience4j.
 ```bash
 go get github.com/sony/gobreaker
 go get golang.org/x/time/rate
+go get github.com/gin-gonic/gin
+go get go.opentelemetry.io/otel/metric
 ```
 
 ## Quick start
@@ -35,55 +37,55 @@ go get golang.org/x/time/rate
 package main
 
 import (
-    "context"
-    "errors"
-    "time"
+	"context"
+	"errors"
+	"time"
 
-    "resilience/resilience"
+	"resilience/resilience"
 )
 
 var ErrValidation = errors.New("validation error")
 
 func callPaymentAPI(ctx context.Context) (interface{}, error) {
-    return "ok", nil
+	return "ok", nil
 }
 
 func main() {
-    cb := resilience.NewCircuitBreaker("payment-service",
-        resilience.WithSlidingWindowType(resilience.TimeBased),
-        resilience.WithSlidingWindowSize(10),
-        resilience.WithFailureRateThreshold(50),
-        resilience.WithSlowCallDurationThreshold(2*time.Second),
-        resilience.WithSlowCallRateThreshold(80),
-        resilience.WithWaitDurationInOpenState(30*time.Second),
-        resilience.WithIgnoreErrors(func(err error) bool {
-            return errors.Is(err, ErrValidation)
-        }),
-    )
+	cb := resilience.NewCircuitBreaker("payment-service",
+		resilience.WithSlidingWindowType(resilience.TimeBased),
+		resilience.WithSlidingWindowSize(10),
+		resilience.WithFailureRateThreshold(50),
+		resilience.WithSlowCallDurationThreshold(2*time.Second),
+		resilience.WithSlowCallRateThreshold(80),
+		resilience.WithWaitDurationInOpenState(30*time.Second),
+		resilience.WithIgnoreErrors(func(err error) bool {
+			return errors.Is(err, ErrValidation)
+		}),
+	)
 
-    retry := resilience.NewRetry("payment-retry",
-        resilience.WithMaxAttempts(3),
-        resilience.WithWaitDuration(500*time.Millisecond),
-        resilience.WithExponentialBackoff(2.0, 5*time.Second),
-    )
+	retry := resilience.NewRetry("payment-retry",
+		resilience.WithMaxAttempts(3),
+		resilience.WithWaitDuration(500*time.Millisecond),
+		resilience.WithExponentialBackoff(2.0, 5*time.Second),
+	)
 
-    bh := resilience.NewBulkhead("payment-bulkhead",
-        resilience.WithMaxConcurrentCalls(25),
-        resilience.WithMaxWaitDuration(100*time.Millisecond),
-    )
+	bh := resilience.NewBulkhead("payment-bulkhead",
+		resilience.WithMaxConcurrentCalls(25),
+		resilience.WithMaxWaitDuration(100*time.Millisecond),
+	)
 
-    rl := resilience.NewRateLimiter("payment-rate",
-        resilience.WithLimitForPeriod(100),
-        resilience.WithLimitRefreshPeriod(time.Second),
-        resilience.WithTimeoutDuration(100*time.Millisecond),
-    )
+	rl := resilience.NewRateLimiter("payment-rate",
+		resilience.WithLimitForPeriod(100),
+		resilience.WithLimitRefreshPeriod(time.Second),
+		resilience.WithTimeoutDuration(100*time.Millisecond),
+	)
 
-    _, _ = resilience.Decorate(callPaymentAPI).
-        WithRateLimiter(rl).
-        WithBulkhead(bh).
-        WithCircuitBreaker(cb).
-        WithRetry(retry).
-        Call(context.Background())
+	_, _ = resilience.Decorate(callPaymentAPI).
+		WithRateLimiter(rl).
+		WithBulkhead(bh).
+		WithCircuitBreaker(cb).
+		WithRetry(retry).
+		Call(context.Background())
 }
 ```
 
@@ -143,7 +145,6 @@ func NewClient() *Client {
 			resilience.WithWaitDuration(200*time.Millisecond),
 			resilience.WithExponentialBackoff(2.0, 2*time.Second),
 			resilience.WithRetryOn(func(err error) bool {
-				// retry only transport / 5xx mapped errors
 				return !errors.Is(err, context.Canceled)
 			}),
 		),
@@ -171,7 +172,6 @@ func (c *Client) Charge(ctx context.Context, req *http.Request) (map[string]any,
 			return nil, errors.New("upstream 5xx")
 		}
 		if resp.StatusCode >= 400 {
-			// business/client errors are often non-retryable
 			return nil, nil
 		}
 
@@ -208,9 +208,9 @@ import (
 )
 
 type Repo struct {
-	db      *sql.DB
-	cb      *resilience.CircuitBreaker
-	retry   *resilience.Retry
+	db       *sql.DB
+	cb       *resilience.CircuitBreaker
+	retry    *resilience.Retry
 	bulkhead *resilience.Bulkhead
 }
 
@@ -230,7 +230,6 @@ func NewRepo(db *sql.DB) *Repo {
 			resilience.WithMaxAttempts(2),
 			resilience.WithWaitDuration(50*time.Millisecond),
 			resilience.WithRetryOn(func(err error) bool {
-				// only retry transient DB failures
 				return err != nil && !errors.Is(err, sql.ErrNoRows)
 			}),
 		),
@@ -286,28 +285,275 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-### 4) Typical error handling in callers
+### 4) Copy-paste middleware wrappers
+
+#### Gorilla Mux (`net/http` middleware)
 
 ```go
-result, err := resilience.Decorate(fn).
-	WithCircuitBreaker(cb).
-	WithRetry(retry).
-	WithBulkhead(bh).
-	WithRateLimiter(rl).
-	Call(ctx)
+r := mux.NewRouter()
 
-switch {
-case err == nil:
-	_ = result
-case errors.Is(err, resilience.ErrCircuitOpen):
-	// fallback or fast-fail
-case errors.Is(err, resilience.ErrBulkheadFull):
-	// load-shed
-case errors.Is(err, resilience.ErrRateLimitExceeded):
-	// backpressure
-default:
-	// domain/transport error
+cb := resilience.NewCircuitBreaker("http-cb")
+retry := resilience.NewRetry("http-retry", resilience.WithMaxAttempts(2))
+bh := resilience.NewBulkhead("http-bh", resilience.WithMaxConcurrentCalls(200))
+rl := resilience.NewRateLimiter("http-rl", resilience.WithLimitForPeriod(500), resilience.WithLimitRefreshPeriod(time.Second))
+
+r.Use(resilience.GorillaMuxMiddleware(resilience.MiddlewareConfig{
+	CircuitBreaker: cb,
+	Retry:          retry,
+	Bulkhead:       bh,
+	RateLimiter:    rl,
+}))
+
+r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+})
+```
+
+#### Gin middleware
+
+```go
+gin.SetMode(gin.ReleaseMode)
+router := gin.New()
+
+cb := resilience.NewCircuitBreaker("gin-cb")
+retry := resilience.NewRetry("gin-retry", resilience.WithMaxAttempts(2))
+bh := resilience.NewBulkhead("gin-bh", resilience.WithMaxConcurrentCalls(200))
+rl := resilience.NewRateLimiter("gin-rl", resilience.WithLimitForPeriod(500), resilience.WithLimitRefreshPeriod(time.Second))
+
+router.Use(resilience.GinMiddleware(resilience.MiddlewareConfig{
+	CircuitBreaker: cb,
+	Retry:          retry,
+	Bulkhead:       bh,
+	RateLimiter:    rl,
+}))
+
+router.GET("/v1/orders/:id", func(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"id": c.Param("id")})
+})
+```
+
+### 5) OpenTelemetry metrics export bridge
+
+```go
+import (
+	"context"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"resilience/resilience"
+)
+
+func setupObs(cb *resilience.CircuitBreaker, r *resilience.Retry, bh *resilience.Bulkhead, rl *resilience.RateLimiter) (*resilience.OTelBridge, error) {
+	meter := otel.Meter("my-service")
+	bridge, err := resilience.NewOTelBridge(resilience.OTelBridgeConfig{
+		Meter:         meter,
+		MetricsPrefix: "myservice.resilience",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	bridge.RegisterCircuitBreaker(cb)
+	bridge.RegisterRetry(r)
+	bridge.RegisterBulkhead(bh)
+	bridge.RegisterRateLimiter(rl)
+	return bridge, nil
 }
+
+func shutdownObs(ctx context.Context, bridge *resilience.OTelBridge) {
+	if bridge != nil {
+		_ = bridge.Shutdown(ctx)
+	}
+}
+```
+
+### 6) Full env-driven configuration example (all parameters)
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"resilience/resilience"
+)
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func getenvFloat(key string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func getenvBool(key string, def bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
+}
+
+func getenvDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def
+	}
+	return d
+}
+
+func getenvString(key, def string) string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func main() {
+	// Circuit breaker env vars
+	cbName := getenvString("RES_CB_NAME", "orders-cb")
+	cbWindowType := strings.ToUpper(getenvString("RES_CB_SLIDING_WINDOW_TYPE", "COUNT_BASED"))
+	cbWindowSize := getenvInt("RES_CB_SLIDING_WINDOW_SIZE", 100)
+	cbMinCalls := getenvInt("RES_CB_MINIMUM_NUMBER_OF_CALLS", 100)
+	cbFailureRate := getenvFloat("RES_CB_FAILURE_RATE_THRESHOLD", 50)
+	cbSlowRate := getenvFloat("RES_CB_SLOW_CALL_RATE_THRESHOLD", 100)
+	cbSlowDuration := getenvDuration("RES_CB_SLOW_CALL_DURATION_THRESHOLD", 60*time.Second)
+	cbHalfOpenPermits := getenvInt("RES_CB_PERMITTED_CALLS_HALF_OPEN", 10)
+	cbOpenWait := getenvDuration("RES_CB_WAIT_DURATION_OPEN_STATE", 60*time.Second)
+	cbAutoTransition := getenvBool("RES_CB_AUTO_TRANSITION_OPEN_TO_HALF_OPEN", true)
+
+	windowType := resilience.CountBased
+	if cbWindowType == "TIME_BASED" {
+		windowType = resilience.TimeBased
+	}
+
+	cb := resilience.NewCircuitBreaker(cbName,
+		resilience.WithSlidingWindowType(windowType),
+		resilience.WithSlidingWindowSize(cbWindowSize),
+		resilience.WithMinimumNumberOfCalls(cbMinCalls),
+		resilience.WithFailureRateThreshold(cbFailureRate),
+		resilience.WithSlowCallRateThreshold(cbSlowRate),
+		resilience.WithSlowCallDurationThreshold(cbSlowDuration),
+		resilience.WithPermittedNumberOfCallsInHalfOpenState(cbHalfOpenPermits),
+		resilience.WithWaitDurationInOpenState(cbOpenWait),
+		resilience.WithAutomaticTransitionFromOpenToHalfOpen(cbAutoTransition),
+		resilience.WithIgnoreErrors(func(err error) bool {
+			// example: ignore business validation errors
+			return strings.Contains(strings.ToLower(err.Error()), "validation")
+		}),
+		resilience.WithRecordErrors(func(err error) bool {
+			// example: only record timeouts/connection errors
+			s := strings.ToLower(err.Error())
+			return strings.Contains(s, "timeout") || strings.Contains(s, "connection")
+		}),
+	)
+
+	// Retry env vars
+	retry := resilience.NewRetry(getenvString("RES_RETRY_NAME", "orders-retry"),
+		resilience.WithMaxAttempts(getenvInt("RES_RETRY_MAX_ATTEMPTS", 3)),
+		resilience.WithWaitDuration(getenvDuration("RES_RETRY_WAIT_DURATION", 200*time.Millisecond)),
+		resilience.WithExponentialBackoff(
+			getenvFloat("RES_RETRY_BACKOFF_MULTIPLIER", 2.0),
+			getenvDuration("RES_RETRY_MAX_INTERVAL", 5*time.Second),
+		),
+		resilience.WithRetryOn(func(err error) bool {
+			if err == nil {
+				return false
+			}
+			return !errors.Is(err, context.Canceled)
+		}),
+		resilience.WithOnRetry(func(attempt int, err error) {
+			fmt.Printf("retry attempt=%d err=%v\n", attempt, err)
+		}),
+	)
+
+	// Bulkhead env vars
+	bh := resilience.NewBulkhead(getenvString("RES_BH_NAME", "orders-bh"),
+		resilience.WithMaxConcurrentCalls(getenvInt("RES_BH_MAX_CONCURRENT_CALLS", 50)),
+		resilience.WithMaxWaitDuration(getenvDuration("RES_BH_MAX_WAIT_DURATION", 25*time.Millisecond)),
+	)
+
+	// Rate limiter env vars
+	rl := resilience.NewRateLimiter(getenvString("RES_RL_NAME", "orders-rl"),
+		resilience.WithLimitForPeriod(getenvInt("RES_RL_LIMIT_FOR_PERIOD", 200)),
+		resilience.WithLimitRefreshPeriod(getenvDuration("RES_RL_LIMIT_REFRESH_PERIOD", time.Second)),
+		resilience.WithTimeoutDuration(getenvDuration("RES_RL_TIMEOUT_DURATION", 20*time.Millisecond)),
+	)
+
+	// Use all decorators together
+	result, err := resilience.Decorate(func(ctx context.Context) (interface{}, error) {
+		// place your db/rest logic here
+		return "ok", nil
+	}).
+		WithRateLimiter(rl).
+		WithBulkhead(bh).
+		WithCircuitBreaker(cb).
+		WithRetry(retry).
+		Call(context.Background())
+
+	fmt.Printf("result=%v err=%v\n", result, err)
+}
+```
+
+Example `.env` values:
+
+```bash
+RES_CB_NAME=orders-cb
+RES_CB_SLIDING_WINDOW_TYPE=TIME_BASED
+RES_CB_SLIDING_WINDOW_SIZE=10
+RES_CB_MINIMUM_NUMBER_OF_CALLS=20
+RES_CB_FAILURE_RATE_THRESHOLD=50
+RES_CB_SLOW_CALL_RATE_THRESHOLD=80
+RES_CB_SLOW_CALL_DURATION_THRESHOLD=2s
+RES_CB_PERMITTED_CALLS_HALF_OPEN=5
+RES_CB_WAIT_DURATION_OPEN_STATE=30s
+RES_CB_AUTO_TRANSITION_OPEN_TO_HALF_OPEN=true
+
+RES_RETRY_NAME=orders-retry
+RES_RETRY_MAX_ATTEMPTS=3
+RES_RETRY_WAIT_DURATION=200ms
+RES_RETRY_BACKOFF_MULTIPLIER=2.0
+RES_RETRY_MAX_INTERVAL=2s
+
+RES_BH_NAME=orders-bh
+RES_BH_MAX_CONCURRENT_CALLS=50
+RES_BH_MAX_WAIT_DURATION=20ms
+
+RES_RL_NAME=orders-rl
+RES_RL_LIMIT_FOR_PERIOD=200
+RES_RL_LIMIT_REFRESH_PERIOD=1s
+RES_RL_TIMEOUT_DURATION=20ms
 ```
 
 ## Configuration reference
