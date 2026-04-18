@@ -2,6 +2,8 @@
 
 Production-grade resilience primitives for Go inspired by Resilience4j.
 
+> Requires Go 1.25.3 or newer.
+
 ## Feature comparison vs Resilience4j
 
 | Feature | Resilience4j | `resilience` |

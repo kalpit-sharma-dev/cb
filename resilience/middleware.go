@@ -76,28 +76,25 @@ func executeWithComponents(ctx context.Context, cfg MiddlewareConfig, exec func(
 }
 
 func writeHTTPResilienceError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, ErrCircuitOpen):
-		http.Error(w, "circuit open", http.StatusServiceUnavailable)
-	case errors.Is(err, ErrBulkheadFull):
-		http.Error(w, "bulkhead full", http.StatusTooManyRequests)
-	case errors.Is(err, ErrRateLimitExceeded):
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
-	default:
-		http.Error(w, "internal error", http.StatusInternalServerError)
-	}
+	status, message := mapResilienceError(err)
+	http.Error(w, message, status)
 }
 
 func abortGinResilienceError(c *gin.Context, err error) {
+	status, message := mapResilienceError(err)
+	c.AbortWithStatusJSON(status, gin.H{"error": message})
+}
+
+func mapResilienceError(err error) (status int, message string) {
 	switch {
 	case errors.Is(err, ErrCircuitOpen):
-		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "circuit open"})
+		return http.StatusServiceUnavailable, "circuit open"
 	case errors.Is(err, ErrBulkheadFull):
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "bulkhead full"})
+		return http.StatusTooManyRequests, "bulkhead full"
 	case errors.Is(err, ErrRateLimitExceeded):
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+		return http.StatusTooManyRequests, "rate limit exceeded"
 	default:
-		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return http.StatusInternalServerError, "internal error"
 	}
 }
 

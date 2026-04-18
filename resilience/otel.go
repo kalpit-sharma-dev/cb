@@ -15,27 +15,33 @@ type OTelBridgeConfig struct {
 	MetricsPrefix string
 }
 
+type snapshotSources struct {
+	cbList       []*CircuitBreaker
+	retryList    []*Retry
+	bulkheadList []*Bulkhead
+	rateList     []*RateLimiter
+}
+
 // OTelBridge exports events and snapshot metrics to OpenTelemetry.
 type OTelBridge struct {
 	cfg OTelBridgeConfig
 
-	eventCBCalls      metric.Int64Counter
-	eventCBState      metric.Int64Counter
-	eventRetries      metric.Int64Counter
-	eventBulkhead     metric.Int64Counter
-	eventRateLimiter  metric.Int64Counter
+	eventCBCalls     metric.Int64Counter
+	eventCBState     metric.Int64Counter
+	eventRetries     metric.Int64Counter
+	eventBulkhead    metric.Int64Counter
+	eventRateLimiter metric.Int64Counter
+
 	cbFailureRate     metric.Float64ObservableGauge
 	cbSlowCallRate    metric.Float64ObservableGauge
 	retryAttempts     metric.Int64ObservableGauge
 	bulkheadAvailable metric.Int64ObservableGauge
 	rateAllowed       metric.Int64ObservableGauge
-	registration      metric.Registration
 
-	mu           sync.RWMutex
-	cbList       []*CircuitBreaker
-	retryList    []*Retry
-	bulkheadList []*Bulkhead
-	rateList     []*RateLimiter
+	registration metric.Registration
+
+	mu      sync.RWMutex
+	sources snapshotSources
 }
 
 // NewOTelBridge creates an OpenTelemetry bridge instance and registers metric instruments.
@@ -47,74 +53,68 @@ func NewOTelBridge(cfg OTelBridgeConfig) (*OTelBridge, error) {
 		cfg.MetricsPrefix = "resilience"
 	}
 
-	cbCalls, err := cfg.Meter.Int64Counter(cfg.MetricsPrefix + ".cb.calls_total")
-	if err != nil {
+	bridge := &OTelBridge{cfg: cfg}
+	if err := bridge.initInstruments(); err != nil {
 		return nil, err
 	}
-	cbState, err := cfg.Meter.Int64Counter(cfg.MetricsPrefix + ".cb.state_changes_total")
-	if err != nil {
+	if err := bridge.registerSnapshotCallback(); err != nil {
 		return nil, err
 	}
-	retries, err := cfg.Meter.Int64Counter(cfg.MetricsPrefix + ".retry.events_total")
-	if err != nil {
-		return nil, err
-	}
-	bulkheadEvents, err := cfg.Meter.Int64Counter(cfg.MetricsPrefix + ".bulkhead.events_total")
-	if err != nil {
-		return nil, err
-	}
-	rateEvents, err := cfg.Meter.Int64Counter(cfg.MetricsPrefix + ".rate_limiter.events_total")
-	if err != nil {
-		return nil, err
-	}
+	return bridge, nil
+}
 
-	cbFailureRate, err := cfg.Meter.Float64ObservableGauge(cfg.MetricsPrefix + ".cb.failure_rate")
-	if err != nil {
-		return nil, err
-	}
-	cbSlowRate, err := cfg.Meter.Float64ObservableGauge(cfg.MetricsPrefix + ".cb.slow_call_rate")
-	if err != nil {
-		return nil, err
-	}
-	retryAttempts, err := cfg.Meter.Int64ObservableGauge(cfg.MetricsPrefix + ".retry.attempts_total")
-	if err != nil {
-		return nil, err
-	}
-	bulkheadAvailable, err := cfg.Meter.Int64ObservableGauge(cfg.MetricsPrefix + ".bulkhead.available_concurrency")
-	if err != nil {
-		return nil, err
-	}
-	rateAllowed, err := cfg.Meter.Int64ObservableGauge(cfg.MetricsPrefix + ".rate_limiter.allowed_total")
-	if err != nil {
-		return nil, err
-	}
+func (b *OTelBridge) initInstruments() error {
+	var err error
+	meter := b.cfg.Meter
+	prefix := b.cfg.MetricsPrefix
 
-	bridge := &OTelBridge{
-		cfg:               cfg,
-		eventCBCalls:      cbCalls,
-		eventCBState:      cbState,
-		eventRetries:      retries,
-		eventBulkhead:     bulkheadEvents,
-		eventRateLimiter:  rateEvents,
-		cbFailureRate:     cbFailureRate,
-		cbSlowCallRate:    cbSlowRate,
-		retryAttempts:     retryAttempts,
-		bulkheadAvailable: bulkheadAvailable,
-		rateAllowed:       rateAllowed,
+	if b.eventCBCalls, err = meter.Int64Counter(prefix + ".cb.calls_total"); err != nil {
+		return err
 	}
+	if b.eventCBState, err = meter.Int64Counter(prefix + ".cb.state_changes_total"); err != nil {
+		return err
+	}
+	if b.eventRetries, err = meter.Int64Counter(prefix + ".retry.events_total"); err != nil {
+		return err
+	}
+	if b.eventBulkhead, err = meter.Int64Counter(prefix + ".bulkhead.events_total"); err != nil {
+		return err
+	}
+	if b.eventRateLimiter, err = meter.Int64Counter(prefix + ".rate_limiter.events_total"); err != nil {
+		return err
+	}
+	if b.cbFailureRate, err = meter.Float64ObservableGauge(prefix + ".cb.failure_rate"); err != nil {
+		return err
+	}
+	if b.cbSlowCallRate, err = meter.Float64ObservableGauge(prefix + ".cb.slow_call_rate"); err != nil {
+		return err
+	}
+	if b.retryAttempts, err = meter.Int64ObservableGauge(prefix + ".retry.attempts_total"); err != nil {
+		return err
+	}
+	if b.bulkheadAvailable, err = meter.Int64ObservableGauge(prefix + ".bulkhead.available_concurrency"); err != nil {
+		return err
+	}
+	if b.rateAllowed, err = meter.Int64ObservableGauge(prefix + ".rate_limiter.allowed_total"); err != nil {
+		return err
+	}
+	return nil
+}
 
-	registration, err := cfg.Meter.RegisterCallback(bridge.observeSnapshots,
-		cbFailureRate,
-		cbSlowRate,
-		retryAttempts,
-		bulkheadAvailable,
-		rateAllowed,
+func (b *OTelBridge) registerSnapshotCallback() error {
+	registration, err := b.cfg.Meter.RegisterCallback(
+		b.observeSnapshots,
+		b.cbFailureRate,
+		b.cbSlowCallRate,
+		b.retryAttempts,
+		b.bulkheadAvailable,
+		b.rateAllowed,
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	bridge.registration = registration
-	return bridge, nil
+	b.registration = registration
+	return nil
 }
 
 // Shutdown unregisters bridge callbacks.
@@ -133,7 +133,7 @@ func (b *OTelBridge) RegisterCircuitBreaker(cb *CircuitBreaker) {
 	cb.AddListener(&otelCBListener{bridge: b, name: cb.Name()})
 
 	b.mu.Lock()
-	b.cbList = append(b.cbList, cb)
+	b.sources.cbList = append(b.sources.cbList, cb)
 	b.mu.Unlock()
 }
 
@@ -145,7 +145,7 @@ func (b *OTelBridge) RegisterRetry(retry *Retry) {
 	retry.addObserver(b)
 
 	b.mu.Lock()
-	b.retryList = append(b.retryList, retry)
+	b.sources.retryList = append(b.sources.retryList, retry)
 	b.mu.Unlock()
 }
 
@@ -157,7 +157,7 @@ func (b *OTelBridge) RegisterBulkhead(bulkhead *Bulkhead) {
 	bulkhead.addObserver(b)
 
 	b.mu.Lock()
-	b.bulkheadList = append(b.bulkheadList, bulkhead)
+	b.sources.bulkheadList = append(b.sources.bulkheadList, bulkhead)
 	b.mu.Unlock()
 }
 
@@ -169,37 +169,48 @@ func (b *OTelBridge) RegisterRateLimiter(rateLimiter *RateLimiter) {
 	rateLimiter.addObserver(b)
 
 	b.mu.Lock()
-	b.rateList = append(b.rateList, rateLimiter)
+	b.sources.rateList = append(b.sources.rateList, rateLimiter)
 	b.mu.Unlock()
 }
 
 func (b *OTelBridge) observeSnapshots(_ context.Context, obs metric.Observer) error {
-	b.mu.RLock()
-	cbList := append([]*CircuitBreaker(nil), b.cbList...)
-	retryList := append([]*Retry(nil), b.retryList...)
-	bulkheadList := append([]*Bulkhead(nil), b.bulkheadList...)
-	rateList := append([]*RateLimiter(nil), b.rateList...)
-	b.mu.RUnlock()
-
-	for _, cb := range cbList {
+	sources := b.snapshotCopy()
+	for _, cb := range sources.cbList {
 		m := cb.Metrics()
-		attrs := metric.WithAttributes(attribute.String("name", cb.Name()), attribute.String("state", m.State))
+		attrs := metric.WithAttributes(
+			attribute.String("name", cb.Name()),
+			attribute.String("state", m.State),
+		)
 		obs.ObserveFloat64(b.cbFailureRate, m.FailureRate, attrs)
 		obs.ObserveFloat64(b.cbSlowCallRate, m.SlowCallRate, attrs)
 	}
-	for _, r := range retryList {
+	for _, r := range sources.retryList {
 		m := r.Metrics()
-		obs.ObserveInt64(b.retryAttempts, m.TotalAttempts, metric.WithAttributes(attribute.String("name", r.Name())))
+		obs.ObserveInt64(b.retryAttempts, m.TotalAttempts,
+			metric.WithAttributes(attribute.String("name", r.Name())))
 	}
-	for _, bh := range bulkheadList {
+	for _, bh := range sources.bulkheadList {
 		m := bh.Metrics()
-		obs.ObserveInt64(b.bulkheadAvailable, int64(m.AvailableConcurrentCalls), metric.WithAttributes(attribute.String("name", bh.Name())))
+		obs.ObserveInt64(b.bulkheadAvailable, int64(m.AvailableConcurrentCalls),
+			metric.WithAttributes(attribute.String("name", bh.Name())))
 	}
-	for _, rl := range rateList {
+	for _, rl := range sources.rateList {
 		m := rl.Metrics()
-		obs.ObserveInt64(b.rateAllowed, m.AllowedCalls, metric.WithAttributes(attribute.String("name", rl.Name())))
+		obs.ObserveInt64(b.rateAllowed, m.AllowedCalls,
+			metric.WithAttributes(attribute.String("name", rl.Name())))
 	}
 	return nil
+}
+
+func (b *OTelBridge) snapshotCopy() snapshotSources {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return snapshotSources{
+		cbList:       append([]*CircuitBreaker(nil), b.sources.cbList...),
+		retryList:    append([]*Retry(nil), b.sources.retryList...),
+		bulkheadList: append([]*Bulkhead(nil), b.sources.bulkheadList...),
+		rateList:     append([]*RateLimiter(nil), b.sources.rateList...),
+	}
 }
 
 func (b *OTelBridge) OnRetryAttempt(name string, attempt int, err error) {
