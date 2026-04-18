@@ -1,0 +1,9 @@
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: resilience-default-contact
+    receivers:
+      - uid: resilience-default-contact-uid
+        type: grafana-default-email
+        settings: {}
