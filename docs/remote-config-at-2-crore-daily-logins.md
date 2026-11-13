@@ -19,6 +19,50 @@ The phone paints startup from the last activated values on disk. After the first
 
 A published value shows up on the next cold start after that background fetch. With one login a day, that is the following day.
 
+### Block flow
+
+```mermaid
+flowchart TD
+  subgraph phone ["Phone"]
+    start["Cold start"]
+    disk["activate last values from disk"]
+    screen["Draw first screen"]
+    fetch["fetch after first frame"]
+    start --> disk --> screen --> fetch
+  end
+
+  subgraph firebase ["Firebase Remote Config"]
+    template["Client template"]
+  end
+
+  fetch -->|"Inside 12 hours: local hit, $0"| same["Keep the values already on screen"]
+  fetch -->|"12 hours elapsed: one billable download"| template
+  template --> held["Held on disk until the next activate"]
+  held --> next["Next cold start paints the new values"]
+```
+
+Mermaid source:
+
+```text
+flowchart TD
+  subgraph phone ["Phone"]
+    start["Cold start"]
+    disk["activate last values from disk"]
+    screen["Draw first screen"]
+    fetch["fetch after first frame"]
+    start --> disk --> screen --> fetch
+  end
+
+  subgraph firebase ["Firebase Remote Config"]
+    template["Client template"]
+  end
+
+  fetch -->|"Inside 12 hours: local hit, $0"| same["Keep the values already on screen"]
+  fetch -->|"12 hours elapsed: one billable download"| template
+  template --> held["Held on disk until the next activate"]
+  held --> next["Next cold start paints the new values"]
+```
+
 At one network fetch per daily login, 2 crore downloads cost about $69 a day:
 
 - 1,00,000 free
@@ -42,6 +86,62 @@ A realtime listener is free while it is only connected. One publish while 2 cror
 One job on the login service reads the client template every 5 minutes and keeps it in process memory. Login carries a version integer, and the full parameter block only when that version changed. The app saves it and paints the next startup from disk.
 
 288 template reads a day sit inside the free 1 lakh. There is no new config API and no Aerospike. Days when nobody publishes a change, login grows by an integer.
+
+### Block flow
+
+```mermaid
+flowchart TD
+  subgraph server ["Login service"]
+    tick["One refresher, every 5 minutes"]
+    get["GET client template"]
+    memory["In-memory template"]
+    tick --> get --> memory
+  end
+
+  subgraph phone ["Phone"]
+    start["Cold start"]
+    disk["Apply the payload saved last login"]
+    screen["Draw first screen"]
+    login["Existing login request"]
+    save["Write the new payload to disk"]
+    start --> disk --> screen --> login
+  end
+
+  memory --> decide{"configVersion newer than the phone?"}
+  login --> decide
+  decide -->|"Same version"| versionOnly["Return the version integer"]
+  decide -->|"New version"| full["Return version and parameter block"]
+  full --> save
+  save --> next["Next cold start paints the new values"]
+```
+
+Mermaid source:
+
+```text
+flowchart TD
+  subgraph server ["Login service"]
+    tick["One refresher, every 5 minutes"]
+    get["GET client template"]
+    memory["In-memory template"]
+    tick --> get --> memory
+  end
+
+  subgraph phone ["Phone"]
+    start["Cold start"]
+    disk["Apply the payload saved last login"]
+    screen["Draw first screen"]
+    login["Existing login request"]
+    save["Write the new payload to disk"]
+    start --> disk --> screen --> login
+  end
+
+  memory --> decide{"configVersion newer than the phone?"}
+  login --> decide
+  decide -->|"Same version"| versionOnly["Return the version integer"]
+  decide -->|"New version"| full["Return version and parameter block"]
+  full --> save
+  save --> next["Next cold start paints the new values"]
+```
 
 ### Server
 
